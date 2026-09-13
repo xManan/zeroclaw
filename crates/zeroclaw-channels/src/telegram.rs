@@ -1666,6 +1666,75 @@ impl TelegramChannel {
         )
     }
 
+    /// Parse a message id for reaction calls. Accepts either the bare numeric
+    /// Telegram message id or the ZeroClaw-scoped form surfaced to agents,
+    /// e.g. `"telegram_8943231406_893"`.
+    fn parse_reaction_message_id(message_id: &str) -> anyhow::Result<i64> {
+        let raw = message_id.rsplit('_').next().unwrap_or(message_id).trim();
+        raw.parse::<i64>()
+            .map_err(|_| anyhow::Error::msg(format!("invalid Telegram message_id '{message_id}'")))
+    }
+
+    /// Shared `setMessageReaction` call. An empty `emoji` removes reactions.
+    async fn set_message_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        let message_id = Self::parse_reaction_message_id(message_id)?;
+        let client = self.http_client();
+        let url = self.api_url("setMessageReaction");
+        let reaction = if emoji.is_empty() {
+            Vec::new()
+        } else {
+            vec![serde_json::json!({"type": "emoji", "emoji": emoji})]
+        };
+        let body = serde_json::json!({
+            "chat_id": channel_id,
+            "message_id": message_id,
+            "reaction": reaction,
+        });
+
+        let response = match client.post(&url).json(&body).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "chat_id": channel_id,
+                            "message_id": message_id,
+                            "err": err.to_string()
+                        })),
+                    "setMessageReaction request failed"
+                );
+                return Err(anyhow::Error::msg(format!(
+                    "Telegram API request failed: {err}"
+                )));
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_body = response.text().await.unwrap_or_default();
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "chat_id": channel_id,
+                        "message_id": message_id,
+                        "status": status.to_string(),
+                        "body": err_body.clone()
+                    })),
+                "setMessageReaction failed"
+            );
+            anyhow::bail!("Telegram API error {status}: {err_body}");
+        }
+        Ok(())
+    }
+
     fn normalize_identity(value: &str) -> String {
         value.trim().trim_start_matches('@').to_string()
     }
@@ -5269,6 +5338,25 @@ impl Channel for TelegramChannel {
         })
     }
 
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        self.set_message_reaction(channel_id, message_id, emoji)
+            .await
+    }
+
+    async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        self.set_message_reaction(channel_id, message_id, "").await
+    }
+
     fn supports_draft_updates(&self) -> bool {
         self.stream_mode != StreamMode::Off
     }
@@ -6261,6 +6349,23 @@ impl UpdateDisposition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_reaction_message_id_accepts_scoped_and_bare_forms() {
+        assert_eq!(
+            TelegramChannel::parse_reaction_message_id("telegram_8943231406_893").unwrap(),
+            893
+        );
+        assert_eq!(
+            TelegramChannel::parse_reaction_message_id("893").unwrap(),
+            893
+        );
+        assert_eq!(
+            TelegramChannel::parse_reaction_message_id(" 893 ").unwrap(),
+            893
+        );
+        assert!(TelegramChannel::parse_reaction_message_id("not-a-number").is_err());
+    }
 
     #[test]
     fn scrub_masks_poll_error_url() {

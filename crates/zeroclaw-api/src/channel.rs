@@ -999,13 +999,17 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
     }
 
     /// Add a reaction (emoji) to a message.
+    ///
+    /// Channels that support reactions must override this method. The default
+    /// fails loudly so an unimplemented channel never surfaces a fabricated
+    /// success to agents (see `ReactionTool`).
     async fn add_reaction(
         &self,
         _channel_id: &str,
         _message_id: &str,
         _emoji: &str,
     ) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("reactions are not supported by this channel")
     }
 
     /// Remove a reaction (emoji) from a message previously added by this bot.
@@ -1015,7 +1019,7 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
         _message_id: &str,
         _emoji: &str,
     ) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("reactions are not supported by this channel")
     }
 
     /// Pin a message in the channel.
