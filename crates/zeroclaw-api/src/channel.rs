@@ -1000,9 +1000,12 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
 
     /// Add a reaction (emoji) to a message.
     ///
-    /// Channels that support reactions must override this method. The default
-    /// fails loudly so an unimplemented channel never surfaces a fabricated
-    /// success to agents (see `ReactionTool`).
+    /// Automatic, auxiliary reactions (acknowledgements) flow through this
+    /// method and its `remove_reaction` counterpart. Agent-driven reactions
+    /// flow through `set_explicit_reaction` so channels can tell the two
+    /// apart. Channels that support reactions must override these; the
+    /// defaults fail loudly so an unimplemented channel never surfaces a
+    /// fabricated success to agents (see `ReactionTool`).
     async fn add_reaction(
         &self,
         _channel_id: &str,
@@ -1020,6 +1023,24 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
         _emoji: &str,
     ) -> anyhow::Result<()> {
         anyhow::bail!("reactions are not supported by this channel")
+    }
+
+    /// Add or remove an agent-driven (explicit) reaction from the `reaction`
+    /// tool. Channels use the explicit flag to protect user-requested
+    /// reactions from later automatic-acknowledgement cleanup. The default
+    /// delegates to `add_reaction` / `remove_reaction`.
+    async fn set_explicit_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+        add: bool,
+    ) -> anyhow::Result<()> {
+        if add {
+            self.add_reaction(channel_id, message_id, emoji).await
+        } else {
+            self.remove_reaction(channel_id, message_id, emoji).await
+        }
     }
 
     /// Pin a message in the channel.
