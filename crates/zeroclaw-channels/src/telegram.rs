@@ -16410,7 +16410,7 @@ mod tests {
         TelegramChannel::new(
             "123456:ABC-def_GHI".into(),
             "default",
-            Arc::new(|| Vec::new()),
+            Arc::new(Vec::new),
             false,
         )
         .with_api_base(api_base)
