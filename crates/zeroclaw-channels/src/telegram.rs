@@ -16391,7 +16391,7 @@ mod tests {
         assert!(cb_data.strip_prefix("approval:").is_none());
     }
 
-    // --- reaction tool integration (PR #10843 review fixes) ---
+    // --- reaction tool integration tests ---
 
     async fn mount_reaction_ok(server: &wiremock::MockServer) {
         use wiremock::matchers::{method, path};
