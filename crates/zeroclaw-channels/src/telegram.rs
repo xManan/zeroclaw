@@ -483,6 +483,11 @@ enum ReactionWrite {
 /// Automatic acknowledgement writes skip entirely when the slot holds an
 /// explicit (tool) reaction, so the end-of-turn ack swap cannot erase a
 /// user-requested reaction.
+///
+/// Explicit (tool) removals must never report unverified success: when the
+/// tracked state cannot confirm the emoji being removed, they return an error
+/// naming the current reaction instead of silently skipping like automatic
+/// ack cleanup does.
 async fn send_reaction_request(
     state: &tokio::sync::Mutex<std::collections::HashMap<(String, i64), ReactionSlot>>,
     client: reqwest::Client,
@@ -499,10 +504,26 @@ async fn send_reaction_request(
 
     let write = if remove {
         match tracked.get(&key) {
+            // Verified match: the bot is showing exactly the emoji being
+            // removed.
             Some(slot) if slot.emoji == emoji => Some(ReactionWrite::Clear),
-            // Removing an emoji the bot is not currently showing (or never
-            // tracked) would clear a different reaction; skip instead.
-            _ => None,
+            Some(slot) if explicit => {
+                return Err(anyhow::Error::msg(format!(
+                    "message {message_id} currently holds reaction {}; \
+                     cannot verify removal of {emoji}",
+                    slot.emoji
+                )));
+            }
+            // Automatic cleanup of an emoji the bot is not currently showing
+            // would clear a different reaction; skip silently.
+            Some(_) => None,
+            None if explicit => {
+                return Err(anyhow::Error::msg(format!(
+                    "no Telegram reaction is currently tracked on message {message_id}; \
+                     cannot verify removal of {emoji}"
+                )));
+            }
+            None => None,
         }
     } else if !explicit && tracked.get(&key).is_some_and(|slot| slot.explicit) {
         ::zeroclaw_log::record!(
@@ -16526,6 +16547,56 @@ mod tests {
         assert_eq!(
             bodies[2]["reaction"],
             serde_json::json!([{"type": "emoji", "emoji": "\u{2705}"}])
+        );
+    }
+
+    /// Explicit (tool) removal must fail loudly instead of reporting success
+    /// when nothing is tracked for the message — e.g. after a restart — and
+    /// must not send any Telegram request.
+    #[tokio::test]
+    async fn explicit_removal_fails_when_untracked() {
+        let server = wiremock::MockServer::start().await;
+        mount_reaction_ok(&server).await;
+        let ch = reaction_channel(server.uri());
+
+        let err = ch
+            .set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F44D}", false)
+            .await
+            .expect_err("untracked removal must not report success");
+        assert!(
+            err.to_string().contains("cannot verify removal"),
+            "rendered: {err}"
+        );
+        assert!(
+            reaction_request_bodies(&server).await.is_empty(),
+            "failed removal must not reach Telegram"
+        );
+    }
+
+    /// Explicit removal of an emoji the bot is not showing must fail and name
+    /// the reaction actually held, instead of clearing it.
+    #[tokio::test]
+    async fn explicit_removal_fails_on_emoji_mismatch() {
+        let server = wiremock::MockServer::start().await;
+        mount_reaction_ok(&server).await;
+        let ch = reaction_channel(server.uri());
+
+        ch.set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F62E}", true)
+            .await
+            .unwrap();
+        let err = ch
+            .set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F44D}", false)
+            .await
+            .expect_err("mismatched removal must not report success");
+        assert!(
+            err.to_string().contains("\u{1F62E}"),
+            "error must name the held reaction: {err}"
+        );
+        let bodies = reaction_request_bodies(&server).await;
+        assert_eq!(
+            bodies.len(),
+            1,
+            "mismatched removal must not reach Telegram: {bodies:?}"
         );
     }
 
