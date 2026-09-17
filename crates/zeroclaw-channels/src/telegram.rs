@@ -481,8 +481,8 @@ enum ReactionWrite {
 /// only fires when the tracked slot matches the emoji being removed, so a
 /// mismatched or automatic removal cannot clear a different reaction.
 /// Automatic acknowledgement writes skip entirely when the slot holds an
-/// explicit (tool) reaction, so the end-of-turn ack swap cannot erase a
-/// user-requested reaction.
+/// explicit (tool) reaction — even on an emoji match — so the end-of-turn ack
+/// swap cannot erase a user-requested reaction.
 ///
 /// Explicit (tool) removals must never report unverified success: when the
 /// tracked state cannot confirm the emoji being removed, they return an error
@@ -504,6 +504,9 @@ async fn send_reaction_request(
 
     let write = if remove {
         match tracked.get(&key) {
+            // Automatic ack cleanup never touches a tool-set reaction, even
+            // on an emoji match, or the ack swap could erase it.
+            Some(slot) if slot.explicit && !explicit => None,
             // Verified match: the bot is showing exactly the emoji being
             // removed.
             Some(slot) if slot.emoji == emoji => Some(ReactionWrite::Clear),
@@ -16597,6 +16600,37 @@ mod tests {
             bodies.len(),
             1,
             "mismatched removal must not reach Telegram: {bodies:?}"
+        );
+    }
+
+    /// 👀 is in the ack pool: an automatic removal matching an explicit
+    /// tool-set emoji must still skip, or the ack swap could erase the
+    /// user-requested reaction.
+    #[tokio::test]
+    async fn ack_swap_skips_explicit_slot_even_on_emoji_match() {
+        let server = wiremock::MockServer::start().await;
+        mount_reaction_ok(&server).await;
+        let ch = reaction_channel(server.uri());
+
+        ch.set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F440}", true)
+            .await
+            .unwrap();
+        ch.remove_reaction("8943231406", "893", "\u{1F440}")
+            .await
+            .unwrap();
+        ch.add_reaction("8943231406", "893", "\u{2705}")
+            .await
+            .unwrap();
+
+        let bodies = reaction_request_bodies(&server).await;
+        assert_eq!(
+            bodies.len(),
+            1,
+            "ack swap must not reach an explicitly reacted message: {bodies:?}"
+        );
+        assert_eq!(
+            bodies[0]["reaction"],
+            serde_json::json!([{"type": "emoji", "emoji": "\u{1F440}"}])
         );
     }
 
