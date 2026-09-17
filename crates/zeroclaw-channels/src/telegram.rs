@@ -461,9 +461,13 @@ fn random_telegram_ack_reaction() -> &'static str {
 
 /// The bot's last-applied reaction for one message and whether the
 /// `reaction` tool set it (explicit) versus an automatic acknowledgement.
+/// `emoji: None` is a verified-clear tombstone: the bot's slot was emptied
+/// by a tracked removal, so a later explicit removal of the same message
+/// can report verified success, and ack writes still cannot overwrite the
+/// agent-owned state.
 #[derive(Clone, Debug)]
 struct ReactionSlot {
-    emoji: String,
+    emoji: Option<String>,
     explicit: bool,
 }
 
@@ -487,7 +491,9 @@ enum ReactionWrite {
 /// Explicit (tool) removals must never report unverified success: when the
 /// tracked state cannot confirm the emoji being removed, they return an error
 /// naming the current reaction instead of silently skipping like automatic
-/// ack cleanup does.
+/// ack cleanup does. A tracked removal leaves a verified-clear tombstone, so
+/// a repeated explicit removal of the same message reports success from
+/// memory rather than fabricating it.
 async fn send_reaction_request(
     state: &tokio::sync::Mutex<std::collections::HashMap<(String, i64), ReactionSlot>>,
     client: reqwest::Client,
@@ -509,12 +515,15 @@ async fn send_reaction_request(
             Some(slot) if slot.explicit && !explicit => None,
             // Verified match: the bot is showing exactly the emoji being
             // removed.
-            Some(slot) if slot.emoji == emoji => Some(ReactionWrite::Clear),
+            Some(slot) if slot.emoji.as_deref() == Some(emoji) => Some(ReactionWrite::Clear),
+            // Verified-clear tombstone: the slot was already emptied by a
+            // tracked removal, so the requested removal already happened.
+            Some(slot) if slot.emoji.is_none() && explicit => None,
             Some(slot) if explicit => {
                 return Err(anyhow::Error::msg(format!(
                     "message {message_id} currently holds reaction {}; \
                      cannot verify removal of {emoji}",
-                    slot.emoji
+                    slot.emoji.as_deref().unwrap_or_default()
                 )));
             }
             // Automatic cleanup of an emoji the bot is not currently showing
@@ -607,10 +616,24 @@ async fn send_reaction_request(
 
     match write {
         ReactionWrite::Clear => {
-            tracked.remove(&key);
+            // Keep a verified-clear tombstone so a repeated explicit removal
+            // reports honest success instead of an unverifiable-state error.
+            tracked.insert(
+                key,
+                ReactionSlot {
+                    emoji: None,
+                    explicit,
+                },
+            );
         }
         ReactionWrite::Set(emoji) => {
-            tracked.insert(key, ReactionSlot { emoji, explicit });
+            tracked.insert(
+                key,
+                ReactionSlot {
+                    emoji: Some(emoji),
+                    explicit,
+                },
+            );
         }
     }
     Ok(())
@@ -16606,6 +16629,38 @@ mod tests {
             bodies.len(),
             1,
             "mismatched removal must not reach Telegram: {bodies:?}"
+        );
+    }
+
+    /// A repeated explicit removal after a verified clear reports success
+    /// from the tombstone instead of an unverifiable-state error, and sends
+    /// no additional request.
+    #[tokio::test]
+    async fn explicit_removal_succeeds_after_verified_clear() {
+        let server = wiremock::MockServer::start().await;
+        mount_reaction_ok(&server).await;
+        let ch = reaction_channel(server.uri());
+
+        ch.set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F44D}", true)
+            .await
+            .unwrap();
+        ch.set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F44D}", false)
+            .await
+            .unwrap();
+        ch.set_explicit_reaction("8943231406", "telegram_8943231406_893", "\u{1F44D}", false)
+            .await
+            .expect("repeat removal after verified clear must succeed");
+
+        let bodies = reaction_request_bodies(&server).await;
+        assert_eq!(
+            bodies.len(),
+            2,
+            "tombstoned removal must not reach Telegram: {bodies:?}"
+        );
+        assert_eq!(
+            bodies[1]["reaction"],
+            serde_json::json!([]),
+            "only the first removal sends the clear call"
         );
     }
 
