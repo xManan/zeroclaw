@@ -5480,6 +5480,12 @@ impl Channel for TelegramChannel {
             .await
     }
 
+    /// Telegram's native random-pool ack owns the bot's single reaction
+    /// slot; orchestrator-driven acks would compete with it for the slot.
+    fn supports_orchestrator_ack_reactions(&self) -> bool {
+        false
+    }
+
     fn supports_draft_updates(&self) -> bool {
         self.stream_mode != StreamMode::Off
     }
@@ -16652,5 +16658,14 @@ mod tests {
         assert_eq!(bodies[0]["chat_id"], "-100200300");
         assert_eq!(bodies[0]["message_thread_id"], "77");
         assert_eq!(bodies[0]["message_id"], 42);
+    }
+
+    /// Telegram's native ack owns the single bot reaction slot; the channel
+    /// must decline the generic orchestrator acks so only one mechanism
+    /// writes reactions.
+    #[test]
+    fn telegram_declines_orchestrator_ack_reactions() {
+        let ch = reaction_channel("http://127.0.0.1:1".into());
+        assert!(!ch.supports_orchestrator_ack_reactions());
     }
 }

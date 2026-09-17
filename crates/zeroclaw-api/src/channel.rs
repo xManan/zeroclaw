@@ -998,6 +998,14 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
         Ok(())
     }
 
+    /// Whether generic orchestrator-driven acknowledgement reactions (the
+    /// early 👀 and the end-of-turn completion swap) run on this channel.
+    /// Channels that own a native ack mechanism override this to `false` so
+    /// the two mechanisms do not compete for the same reaction slot.
+    fn supports_orchestrator_ack_reactions(&self) -> bool {
+        true
+    }
+
     /// Add a reaction (emoji) to a message.
     ///
     /// Automatic, auxiliary reactions (acknowledgements) flow through this
